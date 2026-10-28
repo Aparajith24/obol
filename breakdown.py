@@ -33,6 +33,11 @@ BUCKETS = ["fixed_prefix", "resent_history", "echoed_reply", "new_tool_results",
 
 def split_run(steps, strategy="react"):
     """Token counts per bucket for each step of one run (a list, one dict per step)."""
+    if strategy == "hybrid":
+        # Plan calls first (no history), then possibly a step-by-step fallback.
+        plan = [s for s in steps if s.get("phase") == "plan"]
+        react = [s for s in steps if s.get("phase") == "react"]
+        return split_run(plan, "plan") + split_run(react, "react")
     out = []
     for i, s in enumerate(steps):
         b = dict.fromkeys(BUCKETS, 0)

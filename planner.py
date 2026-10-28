@@ -30,7 +30,7 @@ import time
 
 import ollama
 
-from agent import PRICES, PRICES_VERSION, is_correct, log_record, step_cost, usage_of
+from agent import PRICES, PRICES_VERSION, is_correct, log_record, run_react, step_cost, usage_of
 from tasks import TASKS_BY_ID
 from world import get_order, get_unit_price, list_customers, list_orders
 
@@ -185,6 +185,32 @@ def run_plan(task: dict, models: list[str], max_output_tokens=2048, verbose=True
         "error": error, "escalated": len(steps) > 1,
         "est_cost": total_cost, "seconds": round(wall, 3), "steps": steps,
     }
+
+
+def run_hybrid(task: dict, plan_models: list[str], fallback_model: str, verbose=True) -> dict:
+    """Plan first; if every plan fails DETECTABLY, fall back to step-by-step.
+
+    The trigger is the same no-answer-key signal as the cascade. A plan that runs
+    cleanly but is wrong still gets accepted.
+    """
+    plan = run_plan(task, plan_models, verbose=verbose)
+    for s in plan["steps"]:
+        s["phase"] = "plan"
+    record = dict(plan, strategy="hybrid", model="+".join(plan_models) + ">" + fallback_model,
+                  fell_back=False)
+    if plan["error"] is None:
+        return record
+
+    if verbose:
+        print(f"\n== plan failed detectably ({plan['error']}); falling back to step-by-step ==\n")
+    react = run_react(task, fallback_model, verbose=verbose)
+    for s in react["steps"]:
+        s["phase"] = "react"
+    record.update(passed=react["passed"], answer=react["answer"], fell_back=True,
+                  est_cost=plan["est_cost"] + react["est_cost"],
+                  seconds=round(plan["seconds"] + react["seconds"], 3),
+                  steps=plan["steps"] + react["steps"])
+    return record
 
 
 def main():

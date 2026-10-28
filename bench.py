@@ -10,7 +10,7 @@ import argparse
 import time
 
 from agent import log_record, run_react
-from planner import run_plan
+from planner import run_hybrid, run_plan
 from tasks import TASKS
 
 CHEAP, STRONG = "qwen2.5:1.5b", "qwen2.5:7b"
@@ -21,6 +21,9 @@ STRATEGIES = {
     "plan-cheap":   lambda t: run_plan(t, [CHEAP], verbose=False),
     "plan-strong":  lambda t: run_plan(t, [STRONG], verbose=False),
     "plan-cascade": lambda t: run_plan(t, [CHEAP, STRONG], verbose=False),
+    # Fall back to step-by-step when planning fails detectably.
+    "plan>react":    lambda t: run_hybrid(t, [CHEAP], STRONG, verbose=False),
+    "cascade>react": lambda t: run_hybrid(t, [CHEAP, STRONG], STRONG, verbose=False),
 }
 
 
