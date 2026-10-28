@@ -32,11 +32,12 @@ import ollama
 
 from agent import PRICES, PRICES_VERSION, is_correct, log_record, step_cost, usage_of
 from tasks import TASKS_BY_ID
-from world import get_order, get_unit_price, list_orders
+from world import get_order, get_unit_price, list_customers, list_orders
 
 PLAN_PROMPT = """You answer questions about an order database by writing a short Python program.
 
 These functions are available:
+    list_customers() -> list[str]                    # IDs of all customers
     list_orders(customer: str) -> list[str]          # order IDs placed by a customer
     get_order(order_id: str) -> list[dict]           # line items, each {"sku": str, "qty": int}
     get_unit_price(sku: str) -> float                # unit price in dollars
@@ -108,6 +109,7 @@ def execute(code: str) -> tuple[float, int]:
         return wrapper
 
     env = {"__builtins__": SAFE_BUILTINS,
+           "list_customers": counted(list_customers),
            "list_orders": counted(list_orders),
            "get_order": counted(get_order),
            "get_unit_price": counted(get_unit_price)}

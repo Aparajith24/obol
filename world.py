@@ -12,13 +12,22 @@ ORDERS = {
     "A-1003": {"customer": "acme",    "items": [{"sku": "bracket", "qty": 8}, {"sku": "washer", "qty": 500}]},
     "A-1004": {"customer": "acme",    "items": [{"sku": "bolt", "qty": 40}]},
     "A-1005": {"customer": "initech", "items": [{"sku": "nut", "qty": 1000}]},
+    "A-1006": {"customer": "hooli",   "items": [{"sku": "gear", "qty": 20}, {"sku": "bolt", "qty": 100}]},
+    "A-1007": {"customer": "hooli",   "items": [{"sku": "gear", "qty": 5}]},
 }
-UNIT_PRICES = {"bolt": 0.25, "nut": 0.05, "washer": 0.02, "bracket": 3.40}
+UNIT_PRICES = {"bolt": 0.25, "nut": 0.05, "washer": 0.02, "bracket": 3.40, "gear-v2": 1.10}
+# A mid-task surprise: asking for a discontinued sku's price fails, and the error
+# says which sku to use instead. Nothing in the tool descriptions warns about it.
+DISCONTINUED = {"gear": "gear-v2"}
 
 
 # ---------------------------------------------------------------------------
 # Raw tools: return Python values, raise LookupError on bad input.
 # ---------------------------------------------------------------------------
+def list_customers() -> list[str]:
+    return sorted({o["customer"] for o in ORDERS.values()})
+
+
 def list_orders(customer: str) -> list[str]:
     return [oid for oid, o in ORDERS.items() if o["customer"] == customer]
 
@@ -30,6 +39,8 @@ def get_order(order_id: str) -> list[dict]:
 
 
 def get_unit_price(sku: str) -> float:
+    if sku in DISCONTINUED:
+        raise LookupError(f"sku {sku!r} is discontinued; use the price of {DISCONTINUED[sku]!r} instead")
     if sku not in UNIT_PRICES:
         raise LookupError(f"no such sku {sku!r}")
     return UNIT_PRICES[sku]
@@ -52,6 +63,7 @@ def calculate(expression: str) -> float:
 
 
 TOOL_FUNCTIONS = {
+    "list_customers": list_customers,
     "list_orders": list_orders,
     "get_order": get_order,
     "get_unit_price": get_unit_price,
@@ -74,7 +86,8 @@ def run_tool(name: str, args: dict) -> str:
 # JSON schemas sent to the model in the step-by-step loop.
 # Note: these definitions are re-sent (and counted as input) on EVERY call.
 # ---------------------------------------------------------------------------
-def _tool(name, description, param):
+def _tool(name, description, param=None):
+    params = [param] if param else []
     return {
         "type": "function",
         "function": {
@@ -82,14 +95,15 @@ def _tool(name, description, param):
             "description": description,
             "parameters": {
                 "type": "object",
-                "properties": {param: {"type": "string"}},
-                "required": [param],
+                "properties": {p: {"type": "string"} for p in params},
+                "required": params,
             },
         },
     }
 
 
 TOOLS = [
+    _tool("list_customers", "List the IDs of all customers."),
     _tool("list_orders", "List the order IDs placed by a customer.", "customer"),
     _tool("get_order", "Get the line items (sku and quantity) for one order.", "order_id"),
     _tool("get_unit_price", "Get the unit price in dollars for a product sku.", "sku"),

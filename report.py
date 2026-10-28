@@ -8,7 +8,7 @@ import json
 import sys
 from collections import defaultdict
 
-DIFFICULTIES = ["easy", "medium", "hard", "edge"]
+DIFFICULTIES = ["easy", "medium", "hard", "edge", "complex", "surprise"]
 
 
 def main():
