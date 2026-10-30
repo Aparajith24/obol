@@ -96,23 +96,43 @@ def check_code(code: str) -> ast.Module:
     return tree
 
 
-def execute(code: str) -> tuple[float, int]:
-    """Run the checked program. Returns (answer, number of tool calls it made)."""
-    tree = check_code(code)
-    calls = 0
+def _short(value, limit=200):
+    text = repr(value)
+    return text if len(text) <= limit else text[:limit] + "..."
 
-    def counted(fn):
+
+def execute(code: str) -> tuple[float, dict]:
+    """Run the checked program. Returns (answer, trace).
+
+    The trace records every tool call (args, result or error, duration) and the
+    program's variables at the end, so a wrong answer can be diagnosed later.
+    On a crash the partial trace rides along on the PlanError.
+    """
+    tree = check_code(code)
+    calls = []
+
+    def traced(fn):
         def wrapper(*args, **kwargs):
-            nonlocal calls
-            calls += 1
-            return fn(*args, **kwargs)
+            entry = {"tool": fn.__name__, "args": [_short(a) for a in args] + [f"{k}={_short(v)}" for k, v in kwargs.items()]}
+            t0 = time.perf_counter()
+            try:
+                result = fn(*args, **kwargs)
+                entry["result"] = _short(result)
+                return result
+            except Exception as e:
+                entry["error"] = f"{type(e).__name__}: {e}"
+                raise
+            finally:
+                entry["ms"] = round((time.perf_counter() - t0) * 1000, 3)
+                calls.append(entry)
         return wrapper
 
-    env = {"__builtins__": SAFE_BUILTINS,
-           "list_customers": counted(list_customers),
-           "list_orders": counted(list_orders),
-           "get_order": counted(get_order),
-           "get_unit_price": counted(get_unit_price)}
+    tools = {f.__name__: traced(f) for f in (list_customers, list_orders, get_order, get_unit_price)}
+    env = {"__builtins__": SAFE_BUILTINS, **tools}
+
+    def final_vars():
+        return {k: _short(v) for k, v in env.items()
+                if k != "__builtins__" and k not in tools and not callable(v)}
 
     def timeout(*_):
         raise PlanError(f"program ran longer than {TIMEOUT_SECONDS}s")
@@ -121,18 +141,24 @@ def execute(code: str) -> tuple[float, int]:
     signal.alarm(TIMEOUT_SECONDS)
     try:
         exec(compile(tree, "<plan>", "exec"), env)
-    except PlanError:
+    except PlanError as e:
+        e.trace = {"tool_trace": calls, "final_vars": final_vars()}
         raise
     except Exception as e:  # the plan's own bug: wrong key, bad ID, type error...
-        raise PlanError(f"program crashed: {type(e).__name__}: {e}")
+        err = PlanError(f"program crashed: {type(e).__name__}: {e}")
+        err.trace = {"tool_trace": calls, "final_vars": final_vars()}
+        raise err
     finally:
         signal.alarm(0)
         signal.signal(signal.SIGALRM, old)
 
+    trace = {"tool_trace": calls, "final_vars": final_vars()}
     answer = env.get("answer")
     if isinstance(answer, bool) or not isinstance(answer, (int, float)):
-        raise PlanError(f"`answer` is not a number: {answer!r}")
-    return float(answer), calls
+        err = PlanError(f"`answer` is not a number: {answer!r}")
+        err.trace = trace
+        raise err
+    return float(answer), trace
 
 
 def run_plan(task: dict, models: list[str], max_output_tokens=2048, verbose=True) -> dict:
@@ -156,16 +182,19 @@ def run_plan(task: dict, models: list[str], max_output_tokens=2048, verbose=True
 
         say(f"── attempt {attempt}: {model} ── {u['seconds']:.2f}s  "
             f"in={u['input_tokens']} out={u['output_tokens']}  ${cost:.8f}")
+        u["code"] = None
         try:
-            code = extract_code(response.message.content)
+            code = u["code"] = extract_code(response.message.content)
             say("   " + code.strip().replace("\n", "\n   "))
-            got, u["tool_calls"] = execute(code)
+            got, trace = execute(code)
             error = None
-            say(f"   -> answer={got}  ({u['tool_calls']} tool calls, 0 tokens)")
+            say(f"   -> answer={got}  ({len(trace['tool_trace'])} tool calls, 0 tokens)")
         except PlanError as e:
-            got, error, u["tool_calls"] = None, str(e), 0
+            got, error, trace = None, str(e), getattr(e, "trace", {"tool_trace": [], "final_vars": {}})
+            if u["code"] is None:
+                u["reply"] = response.message.content[:2000]  # no code block: keep what it said instead
             say(f"   !! {error}")
-        u["error"] = error
+        u.update(trace, tool_calls=len(trace["tool_trace"]), error=error)
         steps.append(u)
         if error is None:
             break  # ran cleanly: we have no way to know if it's wrong, so stop
