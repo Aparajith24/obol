@@ -15,7 +15,9 @@ no code, disallowed code, a crash, or no numeric `answer`. With checks=True, a
 clean run is also rejected when a trace check (checks.py) finds it suspicious.
 With feedback=True, the next rung is told why the previous attempt was rejected.
 With repairs=N, a rejected plan first goes back to the SAME model up to N times,
-with its own program and the reason, before moving to the next rung.
+with its own program and the reason, before moving to the next rung. Pass a dict
+({model: N}) to repair only on some rungs, and repair_crashes=False to repair
+only plans a check rejected (a crash's message rarely tells the model what to fix).
 
 SAFETY: the program is model output, i.e. untrusted. Before running it we walk
 its syntax tree and reject anything outside a small allowlist (no imports, no
@@ -188,7 +190,7 @@ def repair_message(error: str, tool_trace: list) -> str:
     return REPAIR_PROMPT.format(reason=error, calls="Tool calls it made:\n" + "\n".join(calls) if calls else "")
 
 
-def run_plan(task: dict, models: list[str], checks=False, feedback=False, repairs=0,
+def run_plan(task: dict, models: list[str], checks=False, feedback=False, repairs=0, repair_crashes=True,
              max_output_tokens=2048, verbose=True) -> dict:
     """Try each model in order; move to the next only on a detectable failure."""
     say = print if verbose else (lambda *a, **k: None)
@@ -199,8 +201,11 @@ def run_plan(task: dict, models: list[str], checks=False, feedback=False, repair
     got, error, note = None, None, ""
     flagged_answer = None  # a clean but suspicious answer: better than nothing if every rung fails
 
-    schedule = [(model, r) for model in models for r in range(1 + repairs)]
+    per_model = repairs if isinstance(repairs, dict) else dict.fromkeys(models, repairs)
+    schedule = [(model, r) for model in models for r in range(1 + per_model.get(model, 0))]
     for attempt, (model, repair) in enumerate(schedule, 1):
+        if repair and not (repair_crashes or error.startswith("check failed")):
+            continue  # a crash: skip this model's repairs and climb
         messages = [{"role": "system", "content": PLAN_PROMPT},
                     {"role": "user", "content": task["question"] + note}]
         if repair:  # same model, sees its own rejected reply and why: one cheap call
@@ -238,7 +243,8 @@ def run_plan(task: dict, models: list[str], checks=False, feedback=False, repair
         if error is None:
             break  # ran cleanly and (if enabled) passed the checks: accept it
         rejected_reply = response.message.content
-        if feedback and repair == repairs:  # leaving this model: tell the next rung
+        leaving = repair == per_model.get(model, 0) or not (repair_crashes or error.startswith("check failed"))
+        if feedback and leaving:  # leaving this model: tell the next rung
             note = feedback_note(error, trace["tool_trace"])
         say()
 
@@ -256,20 +262,21 @@ def run_plan(task: dict, models: list[str], checks=False, feedback=False, repair
         "model": "+".join(models), "prices_version": PRICES_VERSION,
         "passed": passed, "answer": got, "expected": task["expected"],
         "error": error, "escalated": len(steps) > 1, "checks": checks, "feedback": feedback,
-        "repairs": repairs,
+        "repairs": repairs, "repair_crashes": repair_crashes,
         "feedback_note": note,
         "est_cost": total_cost, "seconds": round(wall, 3), "steps": steps,
     }
 
 
 def run_hybrid(task: dict, plan_models: list[str], fallback_model: str,
-               checks=False, feedback=False, repairs=0, verbose=True) -> dict:
+               checks=False, feedback=False, repairs=0, repair_crashes=True, verbose=True) -> dict:
     """Plan first; if every plan fails DETECTABLY, fall back to step-by-step.
 
     The trigger is the same no-answer-key signal as the cascade. A plan that runs
     cleanly but is wrong still gets accepted.
     """
-    plan = run_plan(task, plan_models, checks=checks, feedback=feedback, repairs=repairs, verbose=verbose)
+    plan = run_plan(task, plan_models, checks=checks, feedback=feedback, repairs=repairs,
+                    repair_crashes=repair_crashes, verbose=verbose)
     for s in plan["steps"]:
         s["phase"] = "plan"
     record = dict(plan, strategy="hybrid", model="+".join(plan_models) + ">" + fallback_model,

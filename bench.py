@@ -32,6 +32,11 @@ STRATEGIES = {
     # Before climbing a rung, let the same model repair its rejected plan once.
     "cascade>react+checks+repair": lambda t: run_hybrid(t, [CHEAP, STRONG], STRONG, checks=True, repairs=1,
                                                         verbose=False),
+    # Repair only on the strong rung and only after a failed check: in experiment 9 those repairs
+    # fixed 10 of 12, while the 1.5B's repairs and repairs after a crash almost never worked.
+    "cascade>react+checks+repair7b": lambda t: run_hybrid(t, [CHEAP, STRONG], STRONG, checks=True,
+                                                          repairs={STRONG: 1}, repair_crashes=False,
+                                                          verbose=False),
 }
 
 
