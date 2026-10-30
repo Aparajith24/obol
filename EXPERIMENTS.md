@@ -19,10 +19,15 @@ the code that produced each result.
 - **A cheap-first ladder looked great on our own tasks and lost on unseen ones.** The ladder is
   cheap plan -> strong plan -> strong step-by-step. Most of its failures were **silent**: the
   program ran fine and returned a wrong number, so nothing escalated.
-- **Generic trace checks catch most silent failures without an answer key.** The checks are
-  "an empty lookup on a suspicious input" and "a comparison against a value the data never
-  contained". With them, the ladder **matched or beat the strong step-by-step agent on unseen
-  tasks at 1.5x lower cost per success**. It still missed our predeclared cost bar.
+- **Hand-written trace checks caught most silent failures in the world they were designed
+  on, but not in a new one.** The checks are "an empty lookup on a suspicious input" and "a
+  comparison against a value the data never contained". In the order world they cut accepted
+  silent wrong answers sharply. In a new library world they fired twice in 270 runs, because
+  its silent failures had other shapes (ignored pagination, `len()` of a dict).
+- **The cost result held on two of three holdouts, in two worlds.** With checks, the plan-first
+  ladder matched the strong step-by-step agent's quality (within noise) at 42-72% of its cost.
+  On holdout v1, before the checks existed, it lost 20 points. No holdout met our predeclared
+  win bar: one loss on quality, one on cost, one inconclusive.
 - **The open problem is escalation, not detection.** Escalating a caught failure to an
   expensive rung that also fails burns money.
 - **Letting the strong model repair its own rejected plan helps.** Given the check's reason, it
@@ -260,6 +265,47 @@ seen · same criteria as v1
     small model mostly wastes a call, and sometimes hides the failure. The next step is to
     repair only on the 7B.
 
+
+### 10. Holdout v3, a new world: **inconclusive**
+`3ef940f` · 30 tasks in a lending library (`library.py`): 8 tools, none shared with the order
+world · 3 repeats · criteria and config written before the run, same thresholds as v1 and v2
+
+The library has failure shapes the order world doesn't: a name search, loans returned in
+pages of 3, a fee policy the program has to apply (grace days and a cap), and a tier with no
+policy at all.
+
+| Strategy | Pass | Cost per task vs react-strong | $ per success |
+|---|---|---|---|
+| react-strong | 35/90 (39%) | 100% | $0.00518 |
+| cascade>react | 33/90 (37%) | 30% | $0.00167 |
+| cascade>react+checks | 39/90 (43%) | 50% | $0.00232 |
+| **cascade>react+checks+repair7b** (under test) | **36/90 (40%)** | **42%** | **$0.00212** |
+| plan-cheap | 11/90 (12%) | 1% | $0.00019 |
+
+- **Verdict: inconclusive.** Paired against react-strong, the config under test came out
+  **+1.1 points [−13.3, +16.7]**. The lower bound misses the −10 bar for a win, and 42% cost
+  is well inside the bar for a loss. `+checks` was also inconclusive: +4.4 [−12.2, +22.2] at 50%.
+- **The cost result held again.** On a world it was never tuned on, the ladder matched the
+  strong agent's quality (within noise) at 30-50% of its cost, about 2.5x cheaper per success.
+- **The checks did not transfer.** They flagged 2 plans in 270 ladder runs, and no repair
+  ever triggered. So the three ladder variants were effectively one config, and their
+  33-39/90 spread is run-to-run noise. 32-40 wrong answers per 90 runs were accepted silently.
+- **The silent failures had new shapes:**
+  - Every clean plan that got a `next_page` ignored it (29 of 29), so counts and maximums
+    missed page 2.
+  - `len(list_loans(...))` counted the keys of the result dict, giving `2` for a member with
+    no loans.
+  - Neither involves an empty result or a guessed string, which are the two shapes our checks
+    look for.
+- **Our sandbox blocked the right answer.** 16 times the 7B wrote a `while` loop to follow
+  the pages. That's a reasonable way to do it, and the sandbox rejected it, sending the run
+  to the expensive rung.
+- **Everything was weak here.** react-strong passed only 39%, and 10 of the 30 tasks were
+  failed by every strategy. The oracle router reached 61% at 17% of the cost.
+- **My prediction:** I guessed "inconclusive, cost 50-70%, failures from paging and
+  name-typed-as-asked". I was right on the verdict and the failure shapes. Cost came in
+  lower than I guessed. I didn't foresee that the checks would almost never fire.
+
 ---
 
 ## Lessons so far
@@ -279,10 +325,15 @@ seen · same criteria as v1
    data. Predeclared criteria kept us honest twice.
 8. **10-30 tasks give wide confidence intervals.** Pass rates differ a lot between tasks, so
    more distinct tasks help more than more repeats.
+9. **Checks you write by looking at failures fit those failures.** A check that is generic in
+   code (no domain words) can still be specific to one world's mistakes. Test detectors on a
+   world they weren't written for.
+10. **The runtime's own limits create failures.** Banning `while` loops blocked the natural
+    way to page through results.
 
 ## Limitations
 
-- **Toy world:** one small fake database, short tool outputs, numeric answers. Real agents have
+- **Toy worlds:** two small fake databases, short tool outputs, numeric answers. Real agents have
   large tool outputs, write actions and fuzzy goals.
 - **Hypothetical prices** and **small local models**. The ratios may change with frontier models
   and real price sheets, including cache pricing, which we don't model.
@@ -308,7 +359,7 @@ seen · same criteria as v1
 Requires Ollama with `qwen2.5:1.5b` and `qwen2.5:7b`, and `uv`.
 
 ```sh
-uv run bench.py --split train --repeats 3 --log runs/bench.jsonl          # or holdout / holdout-v2
+uv run bench.py --split train --repeats 3 --log runs/bench.jsonl          # or holdout / holdout-v2 / library
 uv run bench.py --split holdout-v2 --strategies react-strong "cascade>react+checks" --log runs/x.jsonl
 uv run report.py runs/x.jsonl                                              # pass rates, cost, per task
 uv run curve.py runs/x.jsonl --cheap plan-cheap                            # frontier, random baseline, paired CI
@@ -316,4 +367,10 @@ uv run checks.py runs/x.jsonl -v                                           # sco
 uv run breakdown.py --log runs/x.jsonl                                     # where the tokens go
 ```
 
+`--cheap` and `--strong` default to `ollama/qwen2.5:1.5b` and `ollama/qwen2.5:7b`. Pass other
+models to rerun any experiment with them (see the README).
+
 Run logs (`runs/`) are not committed. Every number above can be regenerated from the commit listed.
+Experiments 1-10 called Ollama through its own Python client. Later commits reach Ollama through
+its OpenAI-compatible endpoint instead, so that any provider works. The prompts and tools are the
+same, but token counts can differ slightly.
