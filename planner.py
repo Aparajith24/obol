@@ -14,6 +14,8 @@ Escalation only uses failures we can DETECT without knowing the right answer:
 no code, disallowed code, a crash, or no numeric `answer`. With checks=True, a
 clean run is also rejected when a trace check (checks.py) finds it suspicious.
 With feedback=True, the next rung is told why the previous attempt was rejected.
+With repairs=N, a rejected plan first goes back to the SAME model up to N times,
+with its own program and the reason, before moving to the next rung.
 
 SAFETY: the program is model output, i.e. untrusted. Before running it we walk
 its syntax tree and reject anything outside a small allowlist (no imports, no
@@ -69,6 +71,7 @@ SAFE_BUILTINS = {
     "print": lambda *a, **k: None,  # models like to print; make it harmless
 }
 TIMEOUT_SECONDS = 5
+PLAN_TOOLS = {f.__name__: f for f in (list_customers, list_orders, get_order, get_unit_price)}
 
 
 class PlanError(Exception):
@@ -128,7 +131,7 @@ def execute(code: str) -> tuple[float, dict]:
                 calls.append(entry)
         return wrapper
 
-    tools = {f.__name__: traced(f) for f in (list_customers, list_orders, get_order, get_unit_price)}
+    tools = {name: traced(f) for name, f in PLAN_TOOLS.items()}
     env = {"__builtins__": SAFE_BUILTINS, **tools}
 
     def final_vars():
@@ -172,7 +175,20 @@ def feedback_note(error: str, tool_trace: list) -> str:
             + "Don't repeat that mistake; look up valid IDs and values first if needed.")
 
 
-def run_plan(task: dict, models: list[str], checks=False, feedback=False,
+REPAIR_PROMPT = """Your program was rejected.
+Why: {reason}
+{calls}
+Write a corrected program that avoids this mistake. Same rules as before: reply with only
+the program, inside a ```python code block."""
+
+
+def repair_message(error: str, tool_trace: list) -> str:
+    calls = [f"  {c['tool']}({', '.join(c['args'])}) -> {c.get('result', c.get('error', ''))[:80]}"
+             for c in tool_trace[:8]]
+    return REPAIR_PROMPT.format(reason=error, calls="Tool calls it made:\n" + "\n".join(calls) if calls else "")
+
+
+def run_plan(task: dict, models: list[str], checks=False, feedback=False, repairs=0,
              max_output_tokens=2048, verbose=True) -> dict:
     """Try each model in order; move to the next only on a detectable failure."""
     say = print if verbose else (lambda *a, **k: None)
@@ -183,17 +199,21 @@ def run_plan(task: dict, models: list[str], checks=False, feedback=False,
     got, error, note = None, None, ""
     flagged_answer = None  # a clean but suspicious answer: better than nothing if every rung fails
 
-    for attempt, model in enumerate(models, 1):
+    schedule = [(model, r) for model in models for r in range(1 + repairs)]
+    for attempt, (model, repair) in enumerate(schedule, 1):
+        messages = [{"role": "system", "content": PLAN_PROMPT},
+                    {"role": "user", "content": task["question"] + note}]
+        if repair:  # same model, sees its own rejected reply and why: one cheap call
+            messages += [{"role": "assistant", "content": rejected_reply},
+                         {"role": "user", "content": repair_message(error, trace["tool_trace"])}]
         t0 = time.perf_counter()
-        response = ollama.chat(model=model, options={"num_predict": max_output_tokens}, messages=[
-            {"role": "system", "content": PLAN_PROMPT},
-            {"role": "user", "content": task["question"] + note},
-        ])
+        response = ollama.chat(model=model, options={"num_predict": max_output_tokens}, messages=messages)
         u = usage_of(response, model, time.perf_counter() - t0)
         cost = step_cost(model, u["input_tokens"], u["output_tokens"])
         total_cost += cost
 
-        say(f"── attempt {attempt}: {model} ── {u['seconds']:.2f}s  "
+        u["repair"] = bool(repair)
+        say(f"── attempt {attempt}: {model}{' (repair)' if repair else ''} ── {u['seconds']:.2f}s  "
             f"in={u['input_tokens']} out={u['output_tokens']}  ${cost:.8f}")
         u["code"] = None
         try:
@@ -203,7 +223,7 @@ def run_plan(task: dict, models: list[str], checks=False, feedback=False,
             error = None
             say(f"   -> answer={got}  ({len(trace['tool_trace'])} tool calls, 0 tokens)")
             if checks:
-                u["flags"] = run_checks(code, trace["tool_trace"])
+                u["flags"] = run_checks(code, trace["tool_trace"], PLAN_TOOLS, task["question"])
                 if u["flags"]:
                     flagged_answer, got = got, None
                     error = "check failed: " + "; ".join(reason for _, reason in u["flags"])
@@ -217,7 +237,8 @@ def run_plan(task: dict, models: list[str], checks=False, feedback=False,
         steps.append(u)
         if error is None:
             break  # ran cleanly and (if enabled) passed the checks: accept it
-        if feedback:
+        rejected_reply = response.message.content
+        if feedback and repair == repairs:  # leaving this model: tell the next rung
             note = feedback_note(error, trace["tool_trace"])
         say()
 
@@ -235,19 +256,20 @@ def run_plan(task: dict, models: list[str], checks=False, feedback=False,
         "model": "+".join(models), "prices_version": PRICES_VERSION,
         "passed": passed, "answer": got, "expected": task["expected"],
         "error": error, "escalated": len(steps) > 1, "checks": checks, "feedback": feedback,
+        "repairs": repairs,
         "feedback_note": note,
         "est_cost": total_cost, "seconds": round(wall, 3), "steps": steps,
     }
 
 
 def run_hybrid(task: dict, plan_models: list[str], fallback_model: str,
-               checks=False, feedback=False, verbose=True) -> dict:
+               checks=False, feedback=False, repairs=0, verbose=True) -> dict:
     """Plan first; if every plan fails DETECTABLY, fall back to step-by-step.
 
     The trigger is the same no-answer-key signal as the cascade. A plan that runs
     cleanly but is wrong still gets accepted.
     """
-    plan = run_plan(task, plan_models, checks=checks, feedback=feedback, verbose=verbose)
+    plan = run_plan(task, plan_models, checks=checks, feedback=feedback, repairs=repairs, verbose=verbose)
     for s in plan["steps"]:
         s["phase"] = "plan"
     record = dict(plan, strategy="hybrid", model="+".join(plan_models) + ">" + fallback_model,

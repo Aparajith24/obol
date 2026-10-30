@@ -29,6 +29,9 @@ STRATEGIES = {
     "cascade>react+checks":    lambda t: run_hybrid(t, [CHEAP, STRONG], STRONG, checks=True, verbose=False),
     "cascade>react+checks+fb": lambda t: run_hybrid(t, [CHEAP, STRONG], STRONG, checks=True, feedback=True,
                                                     verbose=False),
+    # Before climbing a rung, let the same model repair its rejected plan once.
+    "cascade>react+checks+repair": lambda t: run_hybrid(t, [CHEAP, STRONG], STRONG, checks=True, repairs=1,
+                                                        verbose=False),
 }
 
 
@@ -52,7 +55,7 @@ def main():
                 record["split"] = args.split
                 log_record(record, args.log)
                 done += 1
-                print(f"[{done}/{total}] {time.perf_counter() - start:6.0f}s  {name:13} {task['id']:13} "
+                print(f"[{done}/{total}] {time.perf_counter() - start:6.0f}s  {name:28} {task['id']:13} "
                       f"{'PASS' if record['passed'] else 'fail'}  calls={len(record['steps'])}  "
                       f"${record['est_cost']:.7f}", flush=True)
 
