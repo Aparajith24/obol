@@ -25,6 +25,10 @@ the code that produced each result.
   tasks at 1.5x lower cost per success**. It still missed our predeclared cost bar.
 - **The open problem is escalation, not detection.** Escalating a caught failure to an
   expensive rung that also fails burns money.
+- **Letting the strong model repair its own rejected plan helps.** Given the check's reason, it
+  fixed 10 of 12. That cut cost per task by 28% with no loss in pass rate (development data).
+  Repairs by the small model almost never worked, and a few turned crashes into silent wrong
+  answers.
 
 ---
 
@@ -203,8 +207,8 @@ seen · same criteria as v1
   is the cost problem.
 - Development data predicted 83% pass at 52% cost. The holdout gave 56% at 72%.
 
-### 9. Trace checks, version 2, and plan repair (in progress)
-Uncommitted.
+### 9. Trace checks, version 2, and plan repair
+`74b5b05`, `98eae95` · all 53 development tasks (train + holdout v1 + holdout v2) × 2 repeats
 
 - **`empty_lookup` now asks "does this look like a mistake?"** It flags an empty result only
   when the input
@@ -224,7 +228,37 @@ Uncommitted.
   reason and the tool calls, before the ladder climbs. That costs ~1% (1.5B) or ~6% (7B) of a
   step-by-step run. In a smoke test, a repair turned a crash into a clean wrong answer, so
   repair can hide the signal that would have escalated.
-- Results: *pending* (63 development tasks × 2 repeats).
+- Results. This is development data, and the react-strong numbers come from the earlier runs
+  of experiments 7 and 8 on the same tasks:
+
+  | Strategy | Pass | Cost per task vs react-strong | $ per success | Fell back to step-by-step |
+  |---|---|---|---|---|
+  | react-strong | 108/179 (60%) | 100% | $0.00234 | |
+  | cascade>react | 96/179 (54%) | 48% | $0.00126 | |
+  | +checks (v2) | 69/106 (65%) | 60% | $0.00129 | 48 runs |
+  | **+checks (v2) +repair** | **68/106 (64%)** | **43%** | **$0.00094** | **29 runs** |
+
+  - **The empty_lookup fix worked.** Edge tasks went 6/6 for both, up from 4/6 in experiment 8.
+  - **Repair cut cost per task by 28% at the same pass rate.** Paired against +checks it came
+    out −0.9 points [−9.4, +7.5]. Against react-strong it came out +5.0 [−6.2, +16.7], at
+    2.5x lower cost per success. Both are ties on pass rate.
+  - **Only the 7B's repairs were useful.** What each repair attempt did:
+
+    | Model | Rejected for | Repair outcome |
+    |---|---|---|
+    | 7B | check failed | **10/10 fixed and correct**, 2 crashed |
+    | 7B | crash | 25 crashed again, 2 flagged |
+    | 1.5B | check failed | 16 flagged again, 3 crashed: **0 fixed** |
+    | 1.5B | crash | 41 crashed again, 2 flagged, 2 correct, **5 clean but wrong** |
+
+  - **The smoke-test risk was real.** In 5 runs a 1.5B repair turned a crash, which would have
+    escalated, into a clean wrong answer that was accepted. Accepted wrong answers went from
+    12 to 20 overall, though about half of that is sampling noise in first attempts.
+  - Step-by-step was still ~90% of the spend.
+  - **What we took from it:** a repair helps when the reason is specific ("'nuts' never appears
+    in any result") and the model is strong enough to act on it. Repairing a crash from the
+    small model mostly wastes a call, and sometimes hides the failure. The next step is to
+    repair only on the 7B.
 
 ---
 
