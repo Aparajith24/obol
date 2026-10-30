@@ -97,7 +97,64 @@ TASKS = [
         "expected": sum(_order_value(oid) for oid in ORDERS),
     },
 ]
-for t in TASKS:
+# ---- holdout: never used to tune prompts; run only to check the training result ----
+HOLDOUT_TASKS = [
+    {
+        "id": "h-easy-washer", "difficulty": "easy",
+        "question": "What is the unit price in dollars of the product 'washer'?",
+        "expected": UNIT_PRICES["washer"],
+    },
+    {
+        "id": "h-medium-order", "difficulty": "medium",
+        "question": "What is the total value in dollars of order A-1003?",
+        "expected": _order_value("A-1003"),
+    },
+    {
+        "id": "h-medium-nuts", "difficulty": "medium",
+        "question": "How many nuts in total has the customer 'initech' ordered?",
+        "expected": sum(i["qty"] for o in ORDERS.values() if o["customer"] == "initech"
+                        for i in o["items"] if i["sku"] == "nut"),
+    },
+    {
+        "id": "h-complex-avg", "difficulty": "complex",
+        "question": "What is the average value in dollars of an order placed by 'acme'?",
+        "expected": _customer_value("acme") / len([o for o in ORDERS.values() if o["customer"] == "acme"]),
+    },
+    {
+        "id": "h-complex-diff", "difficulty": "complex",
+        "question": "How many dollars more has 'acme' spent in total than 'globex'?",
+        "expected": _customer_value("acme") - _customer_value("globex"),
+    },
+    {
+        "id": "h-complex-min", "difficulty": "complex",
+        "question": "What is the value in dollars of the cheapest single order placed by 'acme'?",
+        "expected": min(_order_value(oid) for oid, o in ORDERS.items() if o["customer"] == "acme"),
+    },
+    {
+        "id": "h-complex-bolts", "difficulty": "complex",
+        "question": "How many orders, across all customers, contain at least one bolt?",
+        "expected": sum(any(i["sku"] == "bolt" for i in o["items"]) for o in ORDERS.values()),
+    },
+    {
+        # Hits the discontinued sku via an order lookup rather than a customer total.
+        "id": "h-surprise-order", "difficulty": "surprise",
+        "question": "What is the total value in dollars of order A-1006?",
+        "expected": _order_value("A-1006"),
+    },
+    {
+        "id": "h-surprise-name", "difficulty": "surprise",
+        "question": "What is the total value in dollars of all orders placed by Globex Corp.?",
+        "expected": _customer_value("globex"),
+    },
+    {
+        "id": "h-surprise-two", "difficulty": "surprise",
+        "question": "What is the combined total value in dollars of all orders placed by "
+                    "'hooli' and 'acme'?",
+        "expected": _customer_value("hooli") + _customer_value("acme"),
+    },
+]
+for t in TASKS + HOLDOUT_TASKS:
     t["expected"] = round(float(t["expected"]), 2)
 
-TASKS_BY_ID = {t["id"]: t for t in TASKS}
+TASKS_BY_ID = {t["id"]: t for t in TASKS + HOLDOUT_TASKS}
+SPLITS = {"train": TASKS, "holdout": HOLDOUT_TASKS}

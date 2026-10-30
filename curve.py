@@ -22,6 +22,7 @@ Ideas borrowed from RouteLLM (Ong et al. 2024):
 import argparse
 import json
 import math
+import random
 from collections import defaultdict
 
 
@@ -113,6 +114,22 @@ def main():
     print("\nfrontier (cheapest -> best), mix neighbours at random to hit any point between:")
     names = {(s["cost"], s["pass"]): l for l, s in stats.items()}
     print("  " + "  ->  ".join(f"{names[pt]} ({pt[1]:.0%}, ${pt[0]:.7f})" for pt in hull))
+
+    # Non-inferiority vs strong, paired by task: the same tasks run under both strategies,
+    # so compare per-task pass rates and resample whole tasks (repeats of a task aren't independent).
+    print(f"\npass-rate difference vs {args.strong}, paired by task (95% bootstrap CI over tasks):")
+    rng = random.Random(0)
+    for label in sorted(stats, key=lambda l: stats[l]["cost"]):
+        if label == args.strong:
+            continue
+        diffs = []
+        for labels in per_task.values():
+            if label in labels and args.strong in labels:
+                rate = lambda l: sum(r["passed"] for r in labels[l]) / len(labels[l])
+                diffs.append(rate(label) - rate(args.strong))
+        means = sorted(sum(rng.choices(diffs, k=len(diffs))) / len(diffs) for _ in range(10_000))
+        mean = sum(diffs) / len(diffs)
+        print(f"  {label:14} {mean:+6.1%}  [{means[249]:+6.1%}, {means[9749]:+6.1%}]  ({len(diffs)} tasks)")
 
 
 if __name__ == "__main__":
