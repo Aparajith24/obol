@@ -25,6 +25,10 @@ STRATEGIES = {
     # Fall back to step-by-step when planning fails detectably.
     "plan>react":    lambda t: run_hybrid(t, [CHEAP], STRONG, verbose=False),
     "cascade>react": lambda t: run_hybrid(t, [CHEAP, STRONG], STRONG, verbose=False),
+    # Also reject clean plans that fail a trace check; optionally tell the next rung why.
+    "cascade>react+checks":    lambda t: run_hybrid(t, [CHEAP, STRONG], STRONG, checks=True, verbose=False),
+    "cascade>react+checks+fb": lambda t: run_hybrid(t, [CHEAP, STRONG], STRONG, checks=True, feedback=True,
+                                                    verbose=False),
 }
 
 

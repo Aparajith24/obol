@@ -11,9 +11,9 @@ LLMCompiler / programmatic tool calling; a program rather than a JSON graph
 because the plan has to loop over results it hasn't seen yet.)
 
 Escalation only uses failures we can DETECT without knowing the right answer:
-no code, disallowed code, a crash, or no numeric `answer`. A plan that runs
-cleanly but computes the wrong number is not caught - in the real world there
-is no answer key to compare against.
+no code, disallowed code, a crash, or no numeric `answer`. With checks=True, a
+clean run is also rejected when a trace check (checks.py) finds it suspicious.
+With feedback=True, the next rung is told why the previous attempt was rejected.
 
 SAFETY: the program is model output, i.e. untrusted. Before running it we walk
 its syntax tree and reject anything outside a small allowlist (no imports, no
@@ -30,6 +30,7 @@ import time
 
 import ollama
 
+from checks import run_checks
 from agent import PRICES, PRICES_VERSION, is_correct, log_record, run_react, step_cost, usage_of
 from tasks import TASKS_BY_ID
 from world import get_order, get_unit_price, list_customers, list_orders
@@ -161,20 +162,32 @@ def execute(code: str) -> tuple[float, dict]:
     return float(answer), trace
 
 
-def run_plan(task: dict, models: list[str], max_output_tokens=2048, verbose=True) -> dict:
+def feedback_note(error: str, tool_trace: list) -> str:
+    """What the next rung is told about a rejected attempt: the reason and the tool calls."""
+    calls = [f"  {c['tool']}({', '.join(c['args'])}) -> {c.get('result', c.get('error', ''))[:80]}"
+             for c in tool_trace[:8]]
+    return ("\n\nNote: a previous attempt at this question was rejected.\n"
+            f"Reason: {error}\n"
+            + ("Tool calls it made:\n" + "\n".join(calls) + "\n" if calls else "")
+            + "Don't repeat that mistake; look up valid IDs and values first if needed.")
+
+
+def run_plan(task: dict, models: list[str], checks=False, feedback=False,
+             max_output_tokens=2048, verbose=True) -> dict:
     """Try each model in order; move to the next only on a detectable failure."""
     say = print if verbose else (lambda *a, **k: None)
     say(f"task={task['id']}  models={' -> '.join(models)}  prices={PRICES_VERSION} (hypothetical)\n")
 
     run_start = time.perf_counter()
     steps, total_cost = [], 0.0
-    got, error = None, None
+    got, error, note = None, None, ""
+    flagged_answer = None  # a clean but suspicious answer: better than nothing if every rung fails
 
     for attempt, model in enumerate(models, 1):
         t0 = time.perf_counter()
         response = ollama.chat(model=model, options={"num_predict": max_output_tokens}, messages=[
             {"role": "system", "content": PLAN_PROMPT},
-            {"role": "user", "content": task["question"]},
+            {"role": "user", "content": task["question"] + note},
         ])
         u = usage_of(response, model, time.perf_counter() - t0)
         cost = step_cost(model, u["input_tokens"], u["output_tokens"])
@@ -189,6 +202,12 @@ def run_plan(task: dict, models: list[str], max_output_tokens=2048, verbose=True
             got, trace = execute(code)
             error = None
             say(f"   -> answer={got}  ({len(trace['tool_trace'])} tool calls, 0 tokens)")
+            if checks:
+                u["flags"] = run_checks(code, trace["tool_trace"])
+                if u["flags"]:
+                    flagged_answer, got = got, None
+                    error = "check failed: " + "; ".join(reason for _, reason in u["flags"])
+                    say(f"   ?? {error}")
         except PlanError as e:
             got, error, trace = None, str(e), getattr(e, "trace", {"tool_trace": [], "final_vars": {}})
             if u["code"] is None:
@@ -197,9 +216,13 @@ def run_plan(task: dict, models: list[str], max_output_tokens=2048, verbose=True
         u.update(trace, tool_calls=len(trace["tool_trace"]), error=error)
         steps.append(u)
         if error is None:
-            break  # ran cleanly: we have no way to know if it's wrong, so stop
+            break  # ran cleanly and (if enabled) passed the checks: accept it
+        if feedback:
+            note = feedback_note(error, trace["tool_trace"])
         say()
 
+    if got is None and flagged_answer is not None:
+        got = flagged_answer
     passed = is_correct(got, task["expected"])
     wall = time.perf_counter() - run_start
     say(f"\nanswer: got={got}  expected={task['expected']}  -> {'PASS' if passed else 'FAIL'}  "
@@ -211,18 +234,20 @@ def run_plan(task: dict, models: list[str], max_output_tokens=2048, verbose=True
         "task": task["id"], "difficulty": task["difficulty"],
         "model": "+".join(models), "prices_version": PRICES_VERSION,
         "passed": passed, "answer": got, "expected": task["expected"],
-        "error": error, "escalated": len(steps) > 1,
+        "error": error, "escalated": len(steps) > 1, "checks": checks, "feedback": feedback,
+        "feedback_note": note,
         "est_cost": total_cost, "seconds": round(wall, 3), "steps": steps,
     }
 
 
-def run_hybrid(task: dict, plan_models: list[str], fallback_model: str, verbose=True) -> dict:
+def run_hybrid(task: dict, plan_models: list[str], fallback_model: str,
+               checks=False, feedback=False, verbose=True) -> dict:
     """Plan first; if every plan fails DETECTABLY, fall back to step-by-step.
 
     The trigger is the same no-answer-key signal as the cascade. A plan that runs
     cleanly but is wrong still gets accepted.
     """
-    plan = run_plan(task, plan_models, verbose=verbose)
+    plan = run_plan(task, plan_models, checks=checks, feedback=feedback, verbose=verbose)
     for s in plan["steps"]:
         s["phase"] = "plan"
     record = dict(plan, strategy="hybrid", model="+".join(plan_models) + ">" + fallback_model,
@@ -232,7 +257,8 @@ def run_hybrid(task: dict, plan_models: list[str], fallback_model: str, verbose=
 
     if verbose:
         print(f"\n== plan failed detectably ({plan['error']}); falling back to step-by-step ==\n")
-    react = run_react(task, fallback_model, verbose=verbose)
+    # With feedback the step-by-step agent sees why the plans were rejected; it's graded on the same answer.
+    react = run_react(dict(task, question=task["question"] + plan["feedback_note"]), fallback_model, verbose=verbose)
     for s in react["steps"]:
         s["phase"] = "react"
     record.update(passed=react["passed"], answer=react["answer"], fell_back=True,
