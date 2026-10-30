@@ -4,7 +4,8 @@ A bare agent loop, written by hand, that prints what every step costs.
     uv run agent.py                                  # default task, cheap model
     uv run agent.py --model qwen2.5:7b --task hard-two
 
-The agent answers a question about a tiny fake order database (world.py). It
+The agent answers a question about a tiny fake database (world.py, or library.py
+for tasks set in the library; see worlds.py). It
 can't see the data directly; it has to call tools to look things up. Each loop
 iteration is one model call, and we print the token usage and estimated cost
 of each one. This is the "step-by-step" (ReAct-style) strategy.
@@ -23,7 +24,8 @@ from pathlib import Path
 import ollama
 
 from tasks import TASKS_BY_ID
-from world import CALCULATOR, TOOLS, run_tool
+from world import CALCULATOR, run_tool
+from worlds import world_of
 
 # ---------------------------------------------------------------------------
 # HYPOTHETICAL prices, USD per 1M tokens. Local inference is free; these are
@@ -40,7 +42,7 @@ PRICES = {
 BASE_PROMPT = "You answer questions using the tools provided. End your answer with a line 'ANSWER: <number>'."
 SEQUENCING_RULES = (
     " Work step by step: call a tool, read its result, then decide the next call."
-    " Only use order IDs and skus that appeared in earlier tool results - never guess them."
+    " Only use {ids} that appeared in earlier tool results - never guess them."
 )
 # Experiment 2: hand the arithmetic to a deterministic tool.
 CALCULATOR_RULE = " Use the calculate tool for all arithmetic; do not do math in your head."
@@ -80,10 +82,11 @@ def run_react(task: dict, model: str, rules=True, calculator=False,
               max_steps=20, max_output_tokens=2048, verbose=True) -> dict:
     say = print if verbose else (lambda *a, **k: None)
 
+    world = world_of(task)
     system = BASE_PROMPT
-    tools = list(TOOLS)
+    tools = list(world["schemas"])
     if rules:
-        system += SEQUENCING_RULES
+        system += SEQUENCING_RULES.format(ids=world["react_ids"])
     if calculator:
         system += CALCULATOR_RULE
         tools.append(CALCULATOR)
@@ -136,7 +139,7 @@ def run_react(task: dict, model: str, rules=True, calculator=False,
 
         # ---- decision point B: run every tool it asked for ----
         for call in tool_calls:
-            result = run_tool(call.function.name, call.function.arguments)
+            result = run_tool(call.function.name, call.function.arguments, world["react_functions"])
             say(f"   [tool_result] {call.function.name} -> {result}")
             messages.append({"role": "tool", "tool_name": call.function.name, "content": result})
         say()

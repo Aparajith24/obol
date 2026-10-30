@@ -37,21 +37,26 @@ import ollama
 from checks import run_checks
 from agent import PRICES, PRICES_VERSION, is_correct, log_record, run_react, step_cost, usage_of
 from tasks import TASKS_BY_ID
-from world import get_order, get_unit_price, list_customers, list_orders
+from world import WORLD as ORDERS
+from worlds import world_of
 
-PLAN_PROMPT = """You answer questions about an order database by writing a short Python program.
+PLAN_TEMPLATE = """You answer questions about {about} by writing a short Python program.
 
 These functions are available:
-    list_customers() -> list[str]                    # IDs of all customers
-    list_orders(customer: str) -> list[str]          # order IDs placed by a customer
-    get_order(order_id: str) -> list[dict]           # line items, each {"sku": str, "qty": int}
-    get_unit_price(sku: str) -> float                # unit price in dollars
+{plan_doc}
 
 Rules:
-- Call the functions to look up everything you need; never guess IDs, skus or prices.
+- Call the functions to look up everything you need; never guess {never_guess}.
 - Use plain Python only: variables, for-loops, if, arithmetic, lists, dicts. No imports, no while-loops.
 - Store the final numeric result in a variable named `answer`.
 - Reply with only the program, inside a ```python code block."""
+
+
+def plan_prompt(world: dict) -> str:
+    return PLAN_TEMPLATE.format(**world)
+
+
+PLAN_PROMPT = plan_prompt(ORDERS)
 
 ALLOWED_NODES = (
     ast.Module, ast.Expr, ast.Assign, ast.AugAssign, ast.For, ast.If, ast.Break, ast.Continue, ast.Pass,
@@ -73,7 +78,7 @@ SAFE_BUILTINS = {
     "print": lambda *a, **k: None,  # models like to print; make it harmless
 }
 TIMEOUT_SECONDS = 5
-PLAN_TOOLS = {f.__name__: f for f in (list_customers, list_orders, get_order, get_unit_price)}
+PLAN_TOOLS = ORDERS["functions"]
 
 
 class PlanError(Exception):
@@ -107,7 +112,7 @@ def _short(value, limit=200):
     return text if len(text) <= limit else text[:limit] + "..."
 
 
-def execute(code: str) -> tuple[float, dict]:
+def execute(code: str, functions=None) -> tuple[float, dict]:
     """Run the checked program. Returns (answer, trace).
 
     The trace records every tool call (args, result or error, duration) and the
@@ -133,7 +138,7 @@ def execute(code: str) -> tuple[float, dict]:
                 calls.append(entry)
         return wrapper
 
-    tools = {name: traced(f) for name, f in PLAN_TOOLS.items()}
+    tools = {name: traced(f) for name, f in (functions or PLAN_TOOLS).items()}
     env = {"__builtins__": SAFE_BUILTINS, **tools}
 
     def final_vars():
@@ -194,6 +199,7 @@ def run_plan(task: dict, models: list[str], checks=False, feedback=False, repair
              max_output_tokens=2048, verbose=True) -> dict:
     """Try each model in order; move to the next only on a detectable failure."""
     say = print if verbose else (lambda *a, **k: None)
+    world = world_of(task)
     say(f"task={task['id']}  models={' -> '.join(models)}  prices={PRICES_VERSION} (hypothetical)\n")
 
     run_start = time.perf_counter()
@@ -206,7 +212,7 @@ def run_plan(task: dict, models: list[str], checks=False, feedback=False, repair
     for attempt, (model, repair) in enumerate(schedule, 1):
         if repair and not (repair_crashes or error.startswith("check failed")):
             continue  # a crash: skip this model's repairs and climb
-        messages = [{"role": "system", "content": PLAN_PROMPT},
+        messages = [{"role": "system", "content": plan_prompt(world)},
                     {"role": "user", "content": task["question"] + note}]
         if repair:  # same model, sees its own rejected reply and why: one cheap call
             messages += [{"role": "assistant", "content": rejected_reply},
@@ -224,11 +230,11 @@ def run_plan(task: dict, models: list[str], checks=False, feedback=False, repair
         try:
             code = u["code"] = extract_code(response.message.content)
             say("   " + code.strip().replace("\n", "\n   "))
-            got, trace = execute(code)
+            got, trace = execute(code, world["functions"])
             error = None
             say(f"   -> answer={got}  ({len(trace['tool_trace'])} tool calls, 0 tokens)")
             if checks:
-                u["flags"] = run_checks(code, trace["tool_trace"], PLAN_TOOLS, task["question"])
+                u["flags"] = run_checks(code, trace["tool_trace"], world["functions"], task["question"])
                 if u["flags"]:
                     flagged_answer, got = got, None
                     error = "check failed: " + "; ".join(reason for _, reason in u["flags"])

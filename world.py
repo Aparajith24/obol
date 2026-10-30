@@ -4,6 +4,7 @@ read it. Plain Python; a model only ever sees it through tool results.
 """
 
 import ast
+import inspect
 import operator
 
 ORDERS = {
@@ -71,13 +72,16 @@ TOOL_FUNCTIONS = {
 }
 
 
-def run_tool(name: str, args: dict) -> str:
+def run_tool(name: str, args: dict, functions=None) -> str:
     """Tool call from a model: arguments are untrusted, result goes back as text."""
-    fn = TOOL_FUNCTIONS.get(name)
+    fn = (functions or TOOL_FUNCTIONS).get(name)
     if fn is None:
         return f"error: unknown tool {name}"
     try:
-        return str(fn(*[str(v) for v in args.values()]))
+        values = {k: str(v) for k, v in args.items()}
+        if set(values) <= set(inspect.signature(fn).parameters):  # by name when the names fit
+            return str(fn(**values))
+        return str(fn(*values.values()))
     except (LookupError, ValueError, SyntaxError, ZeroDivisionError, TypeError) as e:
         return f"error: {e}"
 
@@ -110,3 +114,20 @@ TOOLS = [
 ]
 CALCULATOR = _tool("calculate", "Evaluate an arithmetic expression using + - * / and parentheses, "
                                 "e.g. '120*0.25 + 300*0.05'.", "expression")
+
+PLAN_DOC = """\
+    list_customers() -> list[str]                    # IDs of all customers
+    list_orders(customer: str) -> list[str]          # order IDs placed by a customer
+    get_order(order_id: str) -> list[dict]           # line items, each {"sku": str, "qty": int}
+    get_unit_price(sku: str) -> float                # unit price in dollars"""
+
+WORLD = {
+    "name": "orders",
+    "about": "an order database",
+    "functions": {f.__name__: f for f in (list_customers, list_orders, get_order, get_unit_price)},
+    "react_functions": TOOL_FUNCTIONS,  # also has calculate, offered only with --calculator
+    "plan_doc": PLAN_DOC,
+    "never_guess": "IDs, skus or prices",
+    "react_ids": "order IDs and skus",
+    "schemas": TOOLS,
+}

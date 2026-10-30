@@ -120,7 +120,7 @@ def main():
     p.add_argument("-v", "--verbose", action="store_true", help="print every flagged or missed run")
     p.add_argument("--logs", nargs="*", default=[], help="more logs to pool with the first")
     args = p.parse_args()
-    from planner import PLAN_TOOLS
+    from worlds import world_of
     from tasks import TASKS_BY_ID
 
     # One row per clean plan attempt: the only runs where a check can change anything.
@@ -139,8 +139,9 @@ def main():
                 except ValueError:
                     continue
                 right = abs(answer - r["expected"]) < 0.01
-                rows.append((r, s, right, run_checks(s["code"], s["tool_trace"], PLAN_TOOLS,
-                                                        TASKS_BY_ID[r["task"]]["question"])))
+                task = TASKS_BY_ID[r["task"]]
+                rows.append((r, s, right, run_checks(s["code"], s["tool_trace"], world_of(task)["functions"],
+                                                        task["question"])))
 
     def score(name=None):
         hit = lambda flags: any(n == name for n, _ in flags) if name else bool(flags)

@@ -4,6 +4,7 @@ Run every strategy on every task, several times, into one log.
     uv run bench.py                    # 3 repeats -> runs/bench.jsonl
     uv run bench.py --repeats 5 --log runs/bench-5x.jsonl
     uv run bench.py --split holdout --repeats 5 --log runs/holdout-v1.jsonl
+    uv run bench.py --split library --repeats 3 --log runs/holdout-v3.jsonl
     uv run report.py runs/bench.jsonl  # then summarise
 """
 
