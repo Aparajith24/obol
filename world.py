@@ -77,6 +77,8 @@ def run_tool(name: str, args: dict, functions=None) -> str:
     fn = (functions or TOOL_FUNCTIONS).get(name)
     if fn is None:
         return f"error: unknown tool {name}"
+    if "_unparsed" in args:
+        return "error: arguments were not valid JSON"
     try:
         values = {k: str(v) for k, v in args.items()}
         if set(values) <= set(inspect.signature(fn).parameters):  # by name when the names fit

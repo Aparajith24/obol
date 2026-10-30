@@ -26,7 +26,7 @@ import argparse
 import json
 from collections import defaultdict
 
-from agent import PRICES
+from prices import price_of
 
 BUCKETS = ["fixed_prefix", "resent_history", "echoed_reply", "new_tool_results", "output"]
 
@@ -58,7 +58,7 @@ def split_run(steps, strategy="react"):
 
 def dollars(model, bucket, tokens):
     side = "output" if bucket == "output" else "input"
-    return tokens * PRICES[model][side] / 1_000_000
+    return tokens * price_of(model)[side] / 1_000_000
 
 
 def main():

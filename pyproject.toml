@@ -1,7 +1,9 @@
 [project]
 name = "obol"
 version = "0.1.0"
+license = "MIT"
 requires-python = ">=3.12"
 dependencies = [
-    "ollama>=0.6.3",
+    "anthropic>=2.3.0",
+    "openai>=3.41.0",
 ]

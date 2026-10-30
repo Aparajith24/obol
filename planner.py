@@ -1,8 +1,8 @@
 """
 "Plan once, then execute" strategy.
 
-    uv run planner.py --task hard-acme --model qwen2.5:7b
-    uv run planner.py --task hard-acme --cascade        # 1.5B first, 7B if it visibly fails
+    uv run planner.py --task hard-acme --models ollama/qwen2.5:7b
+    uv run planner.py --task hard-acme --models ollama/qwen2.5:1.5b ollama/qwen2.5:7b   # cheap first
 
 Instead of one model call per tool call, the model is called ONCE and writes a
 short Python program that uses the tools. Plain Python then runs that program:
@@ -32,10 +32,10 @@ import re
 import signal
 import time
 
-import ollama
-
+import llm
 from checks import run_checks
-from agent import PRICES, PRICES_VERSION, is_correct, log_record, run_react, step_cost, usage_of
+from agent import is_correct, log_record, run_react, usage_of
+from prices import PRICES_VERSION, set_price, step_cost
 from tasks import TASKS_BY_ID
 from world import WORLD as ORDERS
 from worlds import world_of
@@ -196,11 +196,11 @@ def repair_message(error: str, tool_trace: list) -> str:
 
 
 def run_plan(task: dict, models: list[str], checks=False, feedback=False, repairs=0, repair_crashes=True,
-             max_output_tokens=2048, verbose=True) -> dict:
+             max_output_tokens=None, verbose=True) -> dict:
     """Try each model in order; move to the next only on a detectable failure."""
     say = print if verbose else (lambda *a, **k: None)
     world = world_of(task)
-    say(f"task={task['id']}  models={' -> '.join(models)}  prices={PRICES_VERSION} (hypothetical)\n")
+    say(f"task={task['id']}  models={' -> '.join(models)}  prices.py {PRICES_VERSION}\n")
 
     run_start = time.perf_counter()
     steps, total_cost = [], 0.0
@@ -218,8 +218,8 @@ def run_plan(task: dict, models: list[str], checks=False, feedback=False, repair
             messages += [{"role": "assistant", "content": rejected_reply},
                          {"role": "user", "content": repair_message(error, trace["tool_trace"])}]
         t0 = time.perf_counter()
-        response = ollama.chat(model=model, options={"num_predict": max_output_tokens}, messages=messages)
-        u = usage_of(response, model, time.perf_counter() - t0)
+        reply = llm.chat(model, messages, max_tokens=max_output_tokens)
+        u = usage_of(reply, model, time.perf_counter() - t0)
         cost = step_cost(model, u["input_tokens"], u["output_tokens"])
         total_cost += cost
 
@@ -228,7 +228,7 @@ def run_plan(task: dict, models: list[str], checks=False, feedback=False, repair
             f"in={u['input_tokens']} out={u['output_tokens']}  ${cost:.8f}")
         u["code"] = None
         try:
-            code = u["code"] = extract_code(response.message.content)
+            code = u["code"] = extract_code(reply.text)
             say("   " + code.strip().replace("\n", "\n   "))
             got, trace = execute(code, world["functions"])
             error = None
@@ -242,13 +242,13 @@ def run_plan(task: dict, models: list[str], checks=False, feedback=False, repair
         except PlanError as e:
             got, error, trace = None, str(e), getattr(e, "trace", {"tool_trace": [], "final_vars": {}})
             if u["code"] is None:
-                u["reply"] = response.message.content[:2000]  # no code block: keep what it said instead
+                u["reply"] = reply.text[:2000]  # no code block: keep what it said instead
             say(f"   !! {error}")
         u.update(trace, tool_calls=len(trace["tool_trace"]), error=error)
         steps.append(u)
         if error is None:
             break  # ran cleanly and (if enabled) passed the checks: accept it
-        rejected_reply = response.message.content
+        rejected_reply = reply.text
         leaving = repair == per_model.get(model, 0) or not (repair_crashes or error.startswith("check failed"))
         if feedback and leaving:  # leaving this model: tell the next rung
             note = feedback_note(error, trace["tool_trace"])
@@ -306,13 +306,16 @@ def run_hybrid(task: dict, plan_models: list[str], fallback_model: str,
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--task", default="hard-acme", choices=TASKS_BY_ID)
-    parser.add_argument("--model", default="qwen2.5:7b", choices=PRICES)
-    parser.add_argument("--cascade", action="store_true", help="try qwen2.5:1.5b first, then qwen2.5:7b")
+    parser.add_argument("--models", nargs="+", default=["ollama/qwen2.5:7b"],
+                        help="provider/model, cheapest first; the next is tried only on a visible failure")
+    parser.add_argument("--checks", action="store_true", help="also reject clean plans that fail a trace check")
+    parser.add_argument("--price", action="append", default=[], metavar="MODEL=IN,OUT")
     parser.add_argument("--log", default="runs/runs.jsonl")
     args = parser.parse_args()
+    for spec in args.price:
+        set_price(spec)
 
-    models = ["qwen2.5:1.5b", "qwen2.5:7b"] if args.cascade else [args.model]
-    log_record(run_plan(TASKS_BY_ID[args.task], models), args.log)
+    log_record(run_plan(TASKS_BY_ID[args.task], args.models, checks=args.checks), args.log)
 
 
 if __name__ == "__main__":

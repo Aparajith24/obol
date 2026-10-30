@@ -57,7 +57,7 @@ def upper_hull(points):
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("log", nargs="?", default="runs/bench.jsonl")
-    p.add_argument("--cheap", default="react-cheap", help="always-cheap baseline label")
+    p.add_argument("--cheap", default="plan-cheap", help="always-cheap baseline label")
     p.add_argument("--strong", default="react-strong", help="always-strong baseline label")
     args = p.parse_args()
 
@@ -77,7 +77,7 @@ def main():
     gap_cost, gap_pass = strong["cost"] - cheap["cost"], strong["pass"] - cheap["pass"]
     hull = upper_hull([(s["cost"], s["pass"]) for s in stats.values()])
 
-    print(f"{len(sum(by_label.values(), []))} runs from {args.log}  (hypothetical prices)")
+    print(f"{len(sum(by_label.values(), []))} runs from {args.log}  (estimated costs: tokens x prices.py)")
     print(f"baselines: cheap={args.cheap}  strong={args.strong}\n")
     print(f"{'strategy':14} {'pass':>7} {'95% CI':>13} {'$ / task':>10} {'% strong $':>10}"
           f" {'PGR':>5} {'random@same$':>12} {'lift':>6}  frontier")

@@ -18,7 +18,7 @@ def main():
     for r in runs:
         by_label[r.get("label", r["strategy"])].append(r)
 
-    print(f"{len(runs)} runs from {path}  (costs: {runs[0]['prices_version']}, hypothetical)\n")
+    print(f"{len(runs)} runs from {path}  (estimated costs, prices {runs[0]['prices_version']})\n")
     print(f"{'strategy':14} {'pass':>7}  " + "  ".join(f"{d:>6}" for d in DIFFICULTIES)
           + f"  {'calls':>5} {'in tok':>6} {'out tok':>7} {'secs':>5}  {'total $':>10} {'$/success':>10}"
           + f"  {'escalated':>9}")
