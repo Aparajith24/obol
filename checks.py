@@ -7,10 +7,16 @@ No answer key and no knowledge of the tools' domain: each check looks only at th
 plan's code and what its tool calls returned. The answer key is used here only to
 GRADE the checks (caught / missed / false alarm), never inside them.
 
-  empty_lookup   A tool returned nothing ([], {}, None, ''). Usually a wrong input:
-                 a name that isn't an ID, an order ID passed as a customer.
-                 False alarm when "nothing" is the honest answer (a customer with no
-                 orders) - escalating then costs money but shouldn't hurt the answer.
+  empty_lookup   A tool returned nothing ([], {}, None, '') AND the input looks like a
+                 mistake: it nearly matches a value some listing tool knows ('Globex
+                 Corp.' vs 'globex'), or it works as input to another lookup tool
+                 ('A-1006' passed as a customer, but get_order('A-1006') works).
+                 Or the input came from nowhere: not in the question, not in any earlier
+                 tool result ('customer123', 'All Customers' - the model invented it).
+                 An input from the question that matches nothing anywhere ('wayne') is
+                 taken as an honest "doesn't exist", so the empty result is accepted.
+                 Needs the tools (read-only, called again by the check); zero-argument
+                 tools are treated as listings of known values.
   unseen_value   The code compares something to a string literal ('nuts', 'BOLT')
                  that never appears in any tool result. A filter on a value the
                  data doesn't contain can't match; the model guessed the spelling.
@@ -18,18 +24,77 @@ GRADE the checks (caught / missed / false alarm), never inside them.
 
 import argparse
 import ast
+import difflib
+import inspect
 import json
+import re
 from collections import Counter
 
 EMPTY = {"[]", "{}", "None", "''", "()", "set()"}
 
 
-def empty_lookup(code, tool_trace):
-    return [f"{c['tool']}({', '.join(c['args'])}) returned {c['result']}"
-            for c in tool_trace if c.get("result") in EMPTY]
+def _is_empty(value):
+    return value is None or (hasattr(value, "__len__") and len(value) == 0)
 
 
-def unseen_value(code, tool_trace):
+def _near(a: str, b: str) -> bool:
+    """Same thing, spelled differently: case, a suffix like ' Inc.', or a small typo."""
+    a, b = a.lower().strip(" ."), b.lower().strip(" .")
+    return a == b or (min(len(a), len(b)) >= 3 and (a in b or b in a)) \
+        or difflib.SequenceMatcher(None, a, b).ratio() >= 0.8
+
+
+def _known_values(tools):
+    """Strings returned by zero-argument tools: our best list of valid IDs and names."""
+    values = set()
+    for name, fn in tools.items():
+        if not inspect.signature(fn).parameters:
+            result = fn()
+            values |= {v for v in (result if isinstance(result, (list, set, tuple)) else []) if isinstance(v, str)}
+    return values
+
+
+def _arg_value(logged: str):
+    """Logged args are repr()s, keyword args as 'name=repr'."""
+    if re.match(r"^\w+=", logged):
+        logged = logged.split("=", 1)[1]
+    try:
+        return ast.literal_eval(logged)
+    except (ValueError, SyntaxError):
+        return None
+
+
+def empty_lookup(code, tool_trace, tools, question=""):
+    reasons = []
+    known = _known_values(tools)
+    for i, c in enumerate(tool_trace):
+        if c.get("result") not in EMPTY or len(c["args"]) != 1:
+            continue
+        arg = _arg_value(c["args"][0])
+        if not isinstance(arg, str) or arg in known:
+            continue  # a real value with genuinely nothing behind it: honest
+        call = f"{c['tool']}({arg!r}) returned {c['result']}"
+        earlier = " ".join(e.get("result", "") for e in tool_trace[:i])
+        if question and (not arg.strip() or (arg.lower() not in question.lower() and arg not in earlier)):
+            reasons.append(f"{call}, and {arg!r} appears neither in the question nor in any earlier tool result")
+            continue
+        near = sorted(v for v in known if _near(arg, v))
+        if near:
+            reasons.append(f"{call}, but {', '.join(map(repr, near))} is a known value - did you mean that?")
+            continue
+        for name, fn in tools.items():  # does it work somewhere else?
+            if name == c["tool"] or len(inspect.signature(fn).parameters) != 1:
+                continue
+            try:
+                if not _is_empty(fn(arg)):
+                    reasons.append(f"{call}, but {name}({arg!r}) works - wrong kind of input?")
+                    break
+            except Exception:
+                pass
+    return reasons
+
+
+def unseen_value(code, tool_trace, tools=None, question=""):
     seen = " ".join(c.get("result", "") for c in tool_trace)
     reasons = []
     for node in ast.walk(ast.parse(code)):
@@ -44,26 +109,38 @@ def unseen_value(code, tool_trace):
 CHECKS = {"empty_lookup": empty_lookup, "unseen_value": unseen_value}
 
 
-def run_checks(code, tool_trace, enabled=tuple(CHECKS)):
+def run_checks(code, tool_trace, tools, question="", enabled=tuple(CHECKS)):
     """All reasons to distrust a clean run, as (check name, reason) pairs."""
-    return [(name, reason) for name in enabled for reason in CHECKS[name](code, tool_trace)]
+    return [(name, reason) for name in enabled for reason in CHECKS[name](code, tool_trace, tools, question)]
 
 
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("log", nargs="?", default="runs/traces-v1.jsonl")
     p.add_argument("-v", "--verbose", action="store_true", help="print every flagged or missed run")
+    p.add_argument("--logs", nargs="*", default=[], help="more logs to pool with the first")
     args = p.parse_args()
+    from planner import PLAN_TOOLS
+    from tasks import TASKS_BY_ID
 
     # One row per clean plan attempt: the only runs where a check can change anything.
+    # Re-run the CURRENT checks on each logged attempt; grade the attempt's own answer.
     rows = []
-    for line in open(args.log):
-        r = json.loads(line)
-        for s in r["steps"]:
-            if s.get("code") is not None and s.get("error") is None and "tool_trace" in s:
-                right = r["passed"] if len(r["steps"]) == 1 else None  # cascades: can't tell which rung was right
-                if right is not None:
-                    rows.append((r, s, right, run_checks(s["code"], s["tool_trace"])))
+    for path in [args.log, *args.logs]:
+        for line in open(path):
+            r = json.loads(line)
+            for s in r["steps"]:
+                if s.get("code") is None or "tool_trace" not in s or not s.get("final_vars"):
+                    continue
+                if s.get("error") and not s["error"].startswith("check failed"):
+                    continue  # crashed: already escalated without any check
+                try:
+                    answer = float(s["final_vars"].get("answer", "None"))
+                except ValueError:
+                    continue
+                right = abs(answer - r["expected"]) < 0.01
+                rows.append((r, s, right, run_checks(s["code"], s["tool_trace"], PLAN_TOOLS,
+                                                        TASKS_BY_ID[r["task"]]["question"])))
 
     def score(name=None):
         hit = lambda flags: any(n == name for n, _ in flags) if name else bool(flags)
@@ -73,7 +150,7 @@ def main():
         ok = sum(1 for *_, right, f in rows if right and not hit(f))
         return caught, missed, false, ok
 
-    print(f"{len(rows)} clean plan runs from {args.log}\n")
+    print(f"{len(rows)} clean plan attempts from {', '.join([args.log, *args.logs])}\n")
     print(f"{'check':14} {'caught':>7} {'missed':>7} {'recall':>7}  {'false alarm':>11} {'of right':>9}")
     for name in [*CHECKS, None]:
         c, m, f, ok = score(name)
